@@ -379,11 +379,16 @@ def main():
     updates = get_updates(offset)
 
     if not updates.get("ok"):
-        print("Error getting updates")
-        sys.exit(1)
+        print("No updates")
+        sys.exit(0)
 
     results = updates.get("result", [])
     print(f"Updates: {len(results)}")
+
+    if not results:
+        print("No new messages")
+        save_data(OFFSET_FILE, str(offset))
+        sys.exit(0)
 
     for update in results:
         offset = update["update_id"] + 1
