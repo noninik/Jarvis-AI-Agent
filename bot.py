@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import requests
-from datetime import datetime, timezone, timedelta
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -37,55 +36,77 @@ TEMPLATES = {
     "swot": {"name": "📊 SWOT-анализ", "prompt": "Проведи SWOT-анализ. Спроси бизнес, разбери: Strengths, Weaknesses, Opportunities, Threats."},
 }
 
-def load_data(filename, default):
-    if os.path.exists(filename):
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f) if filename.endswith(".json") else f.read().strip()
-    return default
 
-def save_data(filename, data):
+def load_json(filename):
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
+def save_json(filename, data):
     with open(filename, "w", encoding="utf-8") as f:
-        if filename.endswith(".json"):
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        else:
-            f.write(str(data))
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 def load_offset():
-    try:
-        return int(load_data(OFFSET_FILE, "0"))
-    except:
-        return 0
+    if os.path.exists(OFFSET_FILE):
+        try:
+            with open(OFFSET_FILE, "r") as f:
+                return int(f.read().strip())
+        except:
+            return 0
+    return 0
 
-def get_user_data(history, chat_id, key, default=""):
-    return history.get(f"{chat_id}_{key}", default)
 
-def set_user_data(history, chat_id, key, value):
-    history[f"{chat_id}_{key}"] = value
+def save_offset(offset):
+    with open(OFFSET_FILE, "w") as f:
+        f.write(str(offset))
+
+
+def get_user(history, chat_id, key, default=""):
+    return history.get(str(chat_id) + "_" + key, default)
+
+
+def set_user(history, chat_id, key, value):
+    history[str(chat_id) + "_" + key] = value
+
 
 def get_context(history, chat_id):
-    return get_user_data(history, chat_id, "context", [])
+    return get_user(history, chat_id, "context", [])
+
 
 def add_context(history, chat_id, role, text):
     ctx = get_context(history, chat_id)
     ctx.append({"role": role, "text": text[:1000]})
     if len(ctx) > 20:
         ctx = ctx[-20:]
-    set_user_data(history, chat_id, "context", ctx)
+    set_user(history, chat_id, "context", ctx)
+
 
 def search_web(query):
     try:
         from bs4 import BeautifulSoup
-        resp = requests.get("https://html.duckduckgo.com/html/", params={"q": query}, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
         soup = BeautifulSoup(resp.text, "html.parser")
         results = []
         for r in soup.select(".result__body")[:5]:
             t = r.select_one(".result__title")
             s = r.select_one(".result__snippet")
             if t and s:
-                results.append(f"• {t.get_text().strip()}\n  {s.get_text().strip()}")
+                results.append(t.get_text().strip() + ": " + s.get_text().strip())
         return "\n\n".join(results) if results else "Ничего не найдено"
     except Exception as e:
-        return f"Ошибка: {e}"
+        return "Ошибка поиска: " + str(e)
+
 
 def parse_website(url):
     try:
@@ -97,7 +118,8 @@ def parse_website(url):
         lines = [l.strip() for l in soup.get_text().splitlines() if l.strip()]
         return "\n".join(lines[:50])[:2000]
     except Exception as e:
-        return f"Ошибка: {e}"
+        return "Ошибка: " + str(e)
+
 
 def call_ai(system_prompt, user_message, context):
     messages = [{"role": "system", "content": system_prompt}]
@@ -116,44 +138,49 @@ def call_ai(system_prompt, user_message, context):
         "temperature": 0.9,
         "max_tokens": 3000,
     }
-    resp = requests.post(GROQ_URL, headers=headers, json=body, timeout=60)
-    if resp.status_code != 200:
-        print("AI error:", resp.status_code, resp.text[:200])
-        return "⚠️ AI временно недоступен. Попробуй через минуту."
+
     try:
+        resp = requests.post(GROQ_URL, headers=headers, json=body, timeout=60)
+        if resp.status_code != 200:
+            print("AI error:", resp.status_code)
+            return "AI временно недоступен. Попробуй через минуту."
         return resp.json()["choices"][0]["message"]["content"]
-    except:
-        return "Не удалось получить ответ"
+    except Exception as e:
+        print("AI exception:", e)
+        return "Ошибка соединения с AI."
 
-def summarize_text(text):
-    return call_ai("Ты эксперт по суммаризации на русском.", f"Краткое содержание, 5 главных мыслей:\n\n{text[:3000]}", [])
 
-def translate_text(text, direction):
-    if direction == "en-ru":
-        return call_ai("Ты переводчик.", f"Переведи на русский и объясни сложные слова:\n\n{text}", [])
-    return call_ai("Ты переводчик.", f"Переведи на английский, 2 варианта (формальный и неформальный):\n\n{text}", [])
-
-def send_message(chat_id, text, keyboard=None):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+def send_msg(chat_id, text, keyboard=None):
+    url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
     while text:
         chunk = text[:4000]
         text = text[4000:]
         payload = {"chat_id": chat_id, "text": chunk}
         if keyboard and not text:
             payload["reply_markup"] = json.dumps(keyboard)
-        requests.post(url, json=payload, timeout=30)
+        try:
+            requests.post(url, json=payload, timeout=30)
+        except:
+            pass
+
 
 def send_typing(chat_id):
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}, timeout=10)
+    try:
+        url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendChatAction"
+        requests.post(url, json={"chat_id": chat_id, "action": "typing"}, timeout=10)
+    except:
+        pass
 
-def answer_callback(callback_id, text=""):
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": callback_id, "text": text}, timeout=10)
 
-def get_updates(offset):
-    resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates", params={"offset": offset, "timeout": 5, "limit": 20}, timeout=15)
-    return resp.json() if resp.status_code == 200 else {"ok": False, "result": []}
+def answer_cb(callback_id, text=""):
+    try:
+        url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/answerCallbackQuery"
+        requests.post(url, json={"callback_query_id": callback_id, "text": text}, timeout=10)
+    except:
+        pass
 
-def main_keyboard():
+
+def main_kb():
     return {"inline_keyboard": [
         [{"text": "💬 Помощник", "callback_data": "mode_helper"}, {"text": "📊 Бизнес", "callback_data": "mode_business"}],
         [{"text": "✍️ Контент", "callback_data": "mode_content"}, {"text": "💻 Код", "callback_data": "mode_coder"}],
@@ -163,7 +190,8 @@ def main_keyboard():
         [{"text": "📦 Шаблоны", "callback_data": "show_templates"}, {"text": "🛠 Инструменты", "callback_data": "show_tools"}],
     ]}
 
-def templates_keyboard():
+
+def tpl_kb():
     return {"inline_keyboard": [
         [{"text": "📋 Бизнес-план", "callback_data": "tpl_biz_plan"}],
         [{"text": "📅 Контент-план", "callback_data": "tpl_content_plan"}],
@@ -176,238 +204,269 @@ def templates_keyboard():
         [{"text": "⬅️ Назад", "callback_data": "back_main"}],
     ]}
 
-def tools_keyboard():
+
+def tools_kb():
     return {"inline_keyboard": [
         [{"text": "🔍 Поиск в интернете", "callback_data": "tool_search"}],
         [{"text": "🌐 Спарсить сайт", "callback_data": "tool_parse"}],
         [{"text": "📝 Суммаризация", "callback_data": "tool_summarize"}],
-        [{"text": "🇬🇧➡️🇷🇺 EN→RU", "callback_data": "tool_translate_enru"}],
-        [{"text": "🇷🇺➡️🇬🇧 RU→EN", "callback_data": "tool_translate_ruen"}],
+        [{"text": "🇬🇧→🇷🇺 EN→RU", "callback_data": "tool_enru"}],
+        [{"text": "🇷🇺→🇬🇧 RU→EN", "callback_data": "tool_ruen"}],
         [{"text": "🗑 Очистить контекст", "callback_data": "tool_clear"}],
         [{"text": "⬅️ Назад", "callback_data": "back_main"}],
     ]}
 
-def after_response_keyboard():
+
+def after_kb():
     return {"inline_keyboard": [
         [{"text": "🔄 Подробнее", "callback_data": "act_more"}, {"text": "📝 Переписать", "callback_data": "act_rewrite"}],
         [{"text": "📋 Список", "callback_data": "act_list"}, {"text": "🎯 Пример", "callback_data": "act_example"}],
         [{"text": "🏠 Меню", "callback_data": "back_main"}],
     ]}
 
-def handle_callback(callback_query, history):
-    chat_id = callback_query["message"]["chat"]["id"]
-    callback_id = callback_query["id"]
-    data = callback_query["data"]
+
+def get_mode_prompt(history, chat_id):
+    mode = get_user(history, chat_id, "mode", DEFAULT_MODE)
+    return MODES.get(mode, MODES[DEFAULT_MODE])["prompt"]
+
+
+def handle_callback(cb, history):
+    chat_id = cb["message"]["chat"]["id"]
+    cb_id = cb["id"]
+    data = cb["data"]
 
     if data.startswith("mode_"):
         mode_key = data[5:]
         if mode_key in MODES:
-            set_user_data(history, chat_id, "mode", mode_key)
-            set_user_data(history, chat_id, "context", [])
-            set_user_data(history, chat_id, "waiting", "")
-            mode = MODES[mode_key]
-            answer_callback(callback_id, mode["name"])
-            send_message(chat_id, f"{mode['emoji']} Режим: {mode['name']}\n\nЗадавай вопросы!", after_response_keyboard())
+            set_user(history, chat_id, "mode", mode_key)
+            set_user(history, chat_id, "context", [])
+            set_user(history, chat_id, "waiting", "")
+            m = MODES[mode_key]
+            answer_cb(cb_id, m["name"])
+            send_msg(chat_id, m["emoji"] + " Режим: " + m["name"] + "\n\nЗадавай вопросы!", after_kb())
 
     elif data == "show_templates":
-        answer_callback(callback_id)
-        send_message(chat_id, "📦 Выбери шаблон:", templates_keyboard())
+        answer_cb(cb_id)
+        send_msg(chat_id, "📦 Выбери шаблон:", tpl_kb())
 
     elif data.startswith("tpl_"):
-        tpl_key = data[4:]
-        if tpl_key in TEMPLATES:
-            tpl = TEMPLATES[tpl_key]
-            answer_callback(callback_id, tpl["name"])
-            mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
+        key = data[4:]
+        if key in TEMPLATES:
+            answer_cb(cb_id, TEMPLATES[key]["name"])
             send_typing(chat_id)
-            answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], tpl["prompt"], get_context(history, chat_id))
-            add_context(history, chat_id, "user", tpl["prompt"])
+            answer = call_ai(get_mode_prompt(history, chat_id), TEMPLATES[key]["prompt"], get_context(history, chat_id))
+            add_context(history, chat_id, "user", TEMPLATES[key]["prompt"])
             add_context(history, chat_id, "assistant", answer)
-            send_message(chat_id, answer, after_response_keyboard())
+            send_msg(chat_id, answer, after_kb())
 
     elif data == "show_tools":
-        answer_callback(callback_id)
-        send_message(chat_id, "🛠 Выбери инструмент:", tools_keyboard())
+        answer_cb(cb_id)
+        send_msg(chat_id, "🛠 Выбери инструмент:", tools_kb())
 
     elif data == "tool_search":
-        answer_callback(callback_id)
-        set_user_data(history, chat_id, "waiting", "search")
-        send_message(chat_id, "🔍 Напиши поисковый запрос:")
+        answer_cb(cb_id)
+        set_user(history, chat_id, "waiting", "search")
+        send_msg(chat_id, "🔍 Напиши поисковый запрос:")
 
     elif data == "tool_parse":
-        answer_callback(callback_id)
-        set_user_data(history, chat_id, "waiting", "parse")
-        send_message(chat_id, "🌐 Отправь ссылку на сайт:")
+        answer_cb(cb_id)
+        set_user(history, chat_id, "waiting", "parse")
+        send_msg(chat_id, "🌐 Отправь ссылку на сайт:")
 
     elif data == "tool_summarize":
-        answer_callback(callback_id)
-        set_user_data(history, chat_id, "waiting", "summarize")
-        send_message(chat_id, "📝 Отправь текст для суммаризации:")
+        answer_cb(cb_id)
+        set_user(history, chat_id, "waiting", "summarize")
+        send_msg(chat_id, "📝 Отправь текст:")
 
-    elif data == "tool_translate_enru":
-        answer_callback(callback_id)
-        set_user_data(history, chat_id, "waiting", "translate_enru")
-        send_message(chat_id, "🇬🇧➡️🇷🇺 Отправь текст на английском:")
+    elif data == "tool_enru":
+        answer_cb(cb_id)
+        set_user(history, chat_id, "waiting", "enru")
+        send_msg(chat_id, "🇬🇧→🇷🇺 Отправь текст на английском:")
 
-    elif data == "tool_translate_ruen":
-        answer_callback(callback_id)
-        set_user_data(history, chat_id, "waiting", "translate_ruen")
-        send_message(chat_id, "🇷🇺➡️🇬🇧 Отправь текст на русском:")
+    elif data == "tool_ruen":
+        answer_cb(cb_id)
+        set_user(history, chat_id, "waiting", "ruen")
+        send_msg(chat_id, "🇷🇺→🇬🇧 Отправь текст на русском:")
 
     elif data == "tool_clear":
-        answer_callback(callback_id, "Очищено!")
-        set_user_data(history, chat_id, "context", [])
-        send_message(chat_id, "🗑 Контекст очищен!", main_keyboard())
+        answer_cb(cb_id, "Очищено!")
+        set_user(history, chat_id, "context", [])
+        send_msg(chat_id, "🗑 Контекст очищен!", main_kb())
 
     elif data == "act_more":
-        answer_callback(callback_id)
+        answer_cb(cb_id)
         send_typing(chat_id)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], "Расскажи подробнее. Добавь деталей, цифр, примеров.", get_context(history, chat_id))
+        answer = call_ai(get_mode_prompt(history, chat_id), "Расскажи подробнее. Добавь деталей, цифр, примеров.", get_context(history, chat_id))
         add_context(history, chat_id, "user", "Подробнее")
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, answer, after_response_keyboard())
+        send_msg(chat_id, answer, after_kb())
 
     elif data == "act_rewrite":
-        answer_callback(callback_id)
+        answer_cb(cb_id)
         send_typing(chat_id)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], "Перепиши последний ответ лучше и интереснее.", get_context(history, chat_id))
+        answer = call_ai(get_mode_prompt(history, chat_id), "Перепиши последний ответ лучше.", get_context(history, chat_id))
         add_context(history, chat_id, "user", "Переписать")
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, answer, after_response_keyboard())
+        send_msg(chat_id, answer, after_kb())
 
     elif data == "act_list":
-        answer_callback(callback_id)
+        answer_cb(cb_id)
         send_typing(chat_id)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], "Оформи последний ответ нумерованным списком.", get_context(history, chat_id))
+        answer = call_ai(get_mode_prompt(history, chat_id), "Оформи последний ответ нумерованным списком.", get_context(history, chat_id))
         add_context(history, chat_id, "user", "Списком")
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, answer, after_response_keyboard())
+        send_msg(chat_id, answer, after_kb())
 
     elif data == "act_example":
-        answer_callback(callback_id)
+        answer_cb(cb_id)
         send_typing(chat_id)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], "Дай конкретный практический пример с цифрами и деталями.", get_context(history, chat_id))
+        answer = call_ai(get_mode_prompt(history, chat_id), "Дай конкретный пример с цифрами и деталями.", get_context(history, chat_id))
         add_context(history, chat_id, "user", "Пример")
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, answer, after_response_keyboard())
+        send_msg(chat_id, answer, after_kb())
 
     elif data == "back_main":
-        answer_callback(callback_id)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        send_message(chat_id, f"🤖 Jarvis 2.0 | {MODES.get(mode, MODES[DEFAULT_MODE])['name']}", main_keyboard())
+        answer_cb(cb_id)
+        mode = get_user(history, chat_id, "mode", DEFAULT_MODE)
+        send_msg(chat_id, "🤖 Jarvis 2.0 | " + MODES.get(mode, MODES[DEFAULT_MODE])["name"], main_kb())
+
 
 def handle_message(chat_id, text, history):
     text = text.strip()
 
-    if text == "/start":
-        welcome = "🤖 Jarvis AI Agent 2.0\n\n"
-        welcome += "Я умею:\n💬 Отвечать на вопросы\n🔍 Искать в интернете\n🌐 Парсить сайты\n💻 Писать код\n📊 Анализировать рынок\n📋 Бизнес-планы\n✍️ Контент\n📝 Суммаризация\n🌍 Перевод\n📦 8 шаблонов\n\nВыбери режим:"
-        send_message(chat_id, welcome, main_keyboard())
+    if text == "/start" or text == "/menu":
+        send_msg(chat_id, "🤖 Jarvis AI Agent 2.0\n\nВыбери режим или напиши вопрос:", main_kb())
         return
 
-    if text == "/menu":
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        send_message(chat_id, f"🤖 {MODES.get(mode, MODES[DEFAULT_MODE])['name']}", main_keyboard())
-        return
-
-    waiting = get_user_data(history, chat_id, "waiting", "")
+    waiting = get_user(history, chat_id, "waiting", "")
 
     if waiting == "search":
-        set_user_data(history, chat_id, "waiting", "")
+        set_user(history, chat_id, "waiting", "")
         send_typing(chat_id)
         results = search_web(text)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], f"Результаты поиска '{text}':\n\n{results}\n\nАнализ и выводы.", get_context(history, chat_id))
-        add_context(history, chat_id, "user", f"Поиск: {text}")
+        answer = call_ai(get_mode_prompt(history, chat_id), "Результаты поиска '" + text + "':\n\n" + results + "\n\nАнализ и выводы.", get_context(history, chat_id))
+        add_context(history, chat_id, "user", "Поиск: " + text)
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, f"🔍 {text}\n\n{answer}", after_response_keyboard())
+        send_msg(chat_id, "🔍 " + text + "\n\n" + answer, after_kb())
         return
 
     if waiting == "parse":
-        set_user_data(history, chat_id, "waiting", "")
+        set_user(history, chat_id, "waiting", "")
         send_typing(chat_id)
         content = parse_website(text)
-        mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-        answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], f"Сайт {text}:\n\n{content}\n\nАнализ.", get_context(history, chat_id))
-        add_context(history, chat_id, "user", f"Парсинг: {text}")
+        answer = call_ai(get_mode_prompt(history, chat_id), "Сайт " + text + ":\n\n" + content + "\n\nАнализ.", get_context(history, chat_id))
+        add_context(history, chat_id, "user", "Парсинг: " + text)
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, f"🌐 {text}\n\n{answer}", after_response_keyboard())
+        send_msg(chat_id, "🌐 " + text + "\n\n" + answer, after_kb())
         return
 
     if waiting == "summarize":
-        set_user_data(history, chat_id, "waiting", "")
+        set_user(history, chat_id, "waiting", "")
         send_typing(chat_id)
-        answer = summarize_text(text)
+        answer = call_ai("Ты эксперт по суммаризации на русском.", "Краткое содержание, 5 главных мыслей:\n\n" + text[:3000], [])
         add_context(history, chat_id, "user", "Суммаризация")
         add_context(history, chat_id, "assistant", answer)
-        send_message(chat_id, f"📝 Краткое содержание:\n\n{answer}", after_response_keyboard())
+        send_msg(chat_id, "📝\n\n" + answer, after_kb())
         return
 
-    if waiting == "translate_enru":
-        set_user_data(history, chat_id, "waiting", "")
+    if waiting == "enru":
+        set_user(history, chat_id, "waiting", "")
         send_typing(chat_id)
-        answer = translate_text(text, "en-ru")
-        send_message(chat_id, f"🇬🇧➡️🇷🇺\n\n{answer}", after_response_keyboard())
+        answer = call_ai("Ты переводчик.", "Переведи на русский и объясни сложные слова:\n\n" + text, [])
+        send_msg(chat_id, "🇬🇧→🇷🇺\n\n" + answer, after_kb())
         return
 
-    if waiting == "translate_ruen":
-        set_user_data(history, chat_id, "waiting", "")
+    if waiting == "ruen":
+        set_user(history, chat_id, "waiting", "")
         send_typing(chat_id)
-        answer = translate_text(text, "ru-en")
-        send_message(chat_id, f"🇷🇺➡️🇬🇧\n\n{answer}", after_response_keyboard())
+        answer = call_ai("Ты переводчик.", "Переведи на английский, 2 варианта:\n\n" + text, [])
+        send_msg(chat_id, "🇷🇺→🇬🇧\n\n" + answer, after_kb())
         return
 
     send_typing(chat_id)
-    mode = get_user_data(history, chat_id, "mode", DEFAULT_MODE)
-    answer = call_ai(MODES.get(mode, MODES[DEFAULT_MODE])["prompt"], text, get_context(history, chat_id))
+    answer = call_ai(get_mode_prompt(history, chat_id), text, get_context(history, chat_id))
     add_context(history, chat_id, "user", text)
     add_context(history, chat_id, "assistant", answer)
-    send_message(chat_id, answer, after_response_keyboard())
+    send_msg(chat_id, answer, after_kb())
+
 
 def main():
     print("=== JARVIS 2.0 START ===")
-    if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
-        print("ERROR: env vars not set")
+
+    if not TELEGRAM_BOT_TOKEN:
+        print("ERROR: TELEGRAM_BOT_TOKEN not set")
+        sys.exit(1)
+    if not GROQ_API_KEY:
+        print("ERROR: GROQ_API_KEY not set")
         sys.exit(1)
 
-    offset = load_offset()
-    history = load_data(HISTORY_FILE, {})
-    updates = get_updates(offset)
+    print("Tokens OK")
 
-    if not updates.get("ok"):
-        print("No updates")
+    offset = load_offset()
+    print("Offset:", offset)
+
+    history = load_json(HISTORY_FILE)
+
+    print("Getting updates...")
+    try:
+        url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/getUpdates"
+        resp = requests.get(url, params={"offset": offset, "timeout": 5, "limit": 20}, timeout=15)
+        print("Telegram status:", resp.status_code)
+        updates = resp.json()
+    except Exception as e:
+        print("Connection error:", e)
         sys.exit(0)
 
+    print("OK:", updates.get("ok"))
+
+    if not updates.get("ok"):
+        print("Resetting offset to 0")
+        save_offset(0)
+        try:
+            resp = requests.get(url, params={"offset": 0, "timeout": 5, "limit": 20}, timeout=15)
+            updates = resp.json()
+            print("Retry OK:", updates.get("ok"))
+        except:
+            print("Still failing")
+            sys.exit(0)
+
     results = updates.get("result", [])
-    print(f"Updates: {len(results)}")
+    print("Updates:", len(results))
 
     if not results:
         print("No new messages")
-        save_data(OFFSET_FILE, str(offset))
         sys.exit(0)
 
     for update in results:
         offset = update["update_id"] + 1
+
         if "callback_query" in update:
             cb = update["callback_query"]
-            print(f"Callback: {cb['data']}")
-            handle_callback(cb, history)
+            print("Callback:", cb.get("data", ""))
+            try:
+                handle_callback(cb, history)
+            except Exception as e:
+                print("Callback error:", e)
             continue
+
         message = update.get("message", {})
         chat_id = message.get("chat", {}).get("id")
         text = message.get("text", "")
+
         if not chat_id or not text:
             continue
-        print(f"Message: {text[:50]}")
-        handle_message(chat_id, text, history)
 
-    save_data(OFFSET_FILE, str(offset))
-    save_data(HISTORY_FILE, history)
+        print("Message:", text[:50])
+        try:
+            handle_message(chat_id, text, history)
+        except Exception as e:
+            print("Message error:", e)
+            send_msg(chat_id, "Произошла ошибка. Попробуй ещё раз.")
+
+    save_offset(offset)
+    save_json(HISTORY_FILE, history)
     print("=== DONE ===")
+
 
 if __name__ == "__main__":
     main()
